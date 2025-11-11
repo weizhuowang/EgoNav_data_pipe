@@ -1,7 +1,8 @@
 # Need to use the GSAM env for this script
 import sys
 
-REPO_PATH = "/afs/cs.stanford.edu/u/weizhuo2/Documents/gits/dinov2"
+# REPO_PATH = "/afs/cs.stanford.edu/u/weizhuo2/Documents/gits/dinov2"
+REPO_PATH = "/home/weizhuo2/Documents/gits/dinov2"
 GSAM_path = "/afs/cs.stanford.edu/u/weizhuo2/Documents/gits/Grounded-Segment-Anything"
 sys.path.insert(1, GSAM_path)
 sys.path.append(REPO_PATH)
@@ -15,7 +16,7 @@ from typing import Any, Tuple
 from PIL import Image
 from tqdm import tqdm
 from huggingface_hub import hf_hub_download
-from segment_anything import build_sam, SamPredictor
+# from segment_anything import build_sam, SamPredictor
 from skimage.transform import resize
 from scipy.spatial.transform import Rotation as R
 from joblib import Parallel, delayed
@@ -25,7 +26,7 @@ from mmcv.runner import load_checkpoint
 from mmseg.apis import init_segmentor, inference_segmentor
 import dinov2.eval.segmentation_m2f.models.segmentors
 
-import GroundingDINO.groundingdino.datasets.transforms as T
+# import GroundingDINO.groundingdino.datasets.transforms as T
 
 # ==========================General Helper Functions==========================
 SURROUND_U_STEP = 1.0  # resolution
@@ -249,20 +250,20 @@ def uv2xyz(u, v, depth):
     return x, y, z
 
 
-def load_frame(np_image: np.array) -> Tuple[np.array, torch.Tensor]:
-    transform = T.Compose(
-        [
-            T.RandomResize([480], max_size=1333),
-            T.ToTensor(),
-            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
-        ]
-    )
-    # # image_source = Image.fromarray(np.transpose(np_image,(1,2,0))).convert("RGB")
-    image_source = Image.fromarray(np_image).convert("RGB")
-    # image = np.asarray(image_source)
-    image_transformed, _ = transform(image_source, None)
-    print(image_transformed.shape)
-    return np_image, image_transformed
+# def load_frame(np_image: np.array) -> Tuple[np.array, torch.Tensor]:
+#     transform = T.Compose(
+#         [
+#             T.RandomResize([480], max_size=1333),
+#             T.ToTensor(),
+#             T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225]),
+#         ]
+#     )
+#     # # image_source = Image.fromarray(np.transpose(np_image,(1,2,0))).convert("RGB")
+#     image_source = Image.fromarray(np_image).convert("RGB")
+#     # image = np.asarray(image_source)
+#     image_transformed, _ = transform(image_source, None)
+#     print(image_transformed.shape)
+#     return np_image, image_transformed
 
 
 def generate_pano(
@@ -393,7 +394,7 @@ class semantic_labeler:
         CONFIG_URL = (
             f"{DINOV2_BASE_URL}/dinov2_vitg14/dinov2_vitg14_ade20k_m2f_config.py"
         )
-        CHECKPOINT_URL = f"{DINOV2_BASE_URL}/dinov2_vitb14/dinov2_vitg14_ade20k_m2f.pth"
+        CHECKPOINT_URL = f"{DINOV2_BASE_URL}/dinov2_vitg14/dinov2_vitg14_ade20k_m2f.pth"
         cfg_str = load_config_from_url(CONFIG_URL)
 
         cfg = mmcv.Config.fromstring(cfg_str, file_format=".py")
