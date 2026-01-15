@@ -399,6 +399,9 @@ class semantic_labeler:
 
         cfg = mmcv.Config.fromstring(cfg_str, file_format=".py")
 
+        # Optimization: use 'whole' mode for faster inference (600ms -> 380ms)
+        cfg.model.test_cfg.mode = "whole"
+
         # model
         model_m2f = init_segmentor(cfg)
         load_checkpoint(model_m2f, CHECKPOINT_URL, map_location="cpu")
@@ -518,7 +521,8 @@ class semantic_labeler:
         print("Begin regenerating panorama")
         self.redo_pano()
 
-    def depth_to_pc(self, depth_frame, seg_frame, video_frame):
+    # Aria
+    def depth_to_pc_aria(self, depth_frame, seg_frame, video_frame):
         pc_frame = depth_frame * 10
         depth_fx = 243
         depth_fy = 243
@@ -593,7 +597,7 @@ class semantic_labeler:
         return values
 
     # D455
-    def depth_to_pcD455(self, depth_frame, seg_frame, video_frame):
+    def depth_to_pc(self, depth_frame, seg_frame, video_frame):
         pc_frame = depth_frame * 10
         depth_fx = 431.0087890625
         depth_fy = 431.0087890625
@@ -713,10 +717,10 @@ class semantic_labeler:
     # =====================
 
     def redo_pano(self):
-        sample_ratio = 0.5  # 0.2, 0.3, 0.5 for high accuracy
+        sample_ratio = 0.4  # 0.2, 0.3, 0.5 for high accuracy
         pano_t = self.data_dict["pano_t"]
-        view_dist = 8.0
-        window_sz = 9  # 32
+        view_dist = 10.0
+        window_sz = 32  # 32
 
         def make_pano_single_pass(curr_pano_t, sample_ratio):
             print(
@@ -861,8 +865,8 @@ if __name__ == "__main__":
     # ==============Load model and image to label================
     # Load data
     print(sys.argv)
-    # bag_name = sys.argv[1]
-    bag_name = "leo.bag"
+    bag_name = sys.argv[1]
+    # bag_name = "leo.bag"
     # bag_name = 'V2DataRedo_realsense0801_lag.bag'
 
     # calib_fac = sys.argv[2]
@@ -889,8 +893,8 @@ if __name__ == "__main__":
     # remove the ones we don't want to save
     minimal = True
     if minimal:
-        # del labeler.data_dict['depth_frame']
-        del labeler.data_dict["video_frame"]
+        del labeler.data_dict["depth_frame"]
+        # del labeler.data_dict["video_frame"]
         del labeler.data_dict["pc_frame"]
         del labeler.data_dict["seg_frame"]
         import gc
