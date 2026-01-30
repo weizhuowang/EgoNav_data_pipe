@@ -185,7 +185,7 @@ class PanoramaRenderer:
         curr_pos: np.ndarray,
         yaw_matrix: np.ndarray,
         filter_dist: bool = True,
-        sample_ratio: float = 0.5
+        sample_ratio: float = 0.4
     ) -> np.ndarray:
         """
         Render RGB+D+Seg panorama

@@ -35,25 +35,39 @@ PANO_U_STEP = 1.0
 PANO_V_STEP = 1.0
 
 # Semantic class definitions (8 classes)
-# 0: floor/ground
-# 1: wall
-# 2: stair
-# 3: door
-# 4: obstacle (furniture, plants, etc.)
-# 5: human
-# 6: terrain (grass, sand, etc.)
-# 7: other/unknown
+# Must match the order in ade2our mapping and original prompts!
+# 0: floor/ground (sidewalk, road, path)
+# 1: stair (stairs, escalator, step)
+# 2: door (all types of doors)
+# 3: wall (wall, pillar, fence, building)
+# 4: obstacle (furniture, plants, pole, etc.)
+# 5: human (person, pedestrian, vehicle)
+# 6: terrain (grass, sand, earth, dirt)
+# 7: other/unknown (background, sky, ceiling)
 SEMANTIC_CLASSES = [
-    'floor', 'wall', 'stair', 'door', 'obstacle', 'human', 'terrain', 'other'
+    'floor', 'stair', 'door', 'wall', 'obstacle', 'human', 'terrain', 'other'
 ]
 NUM_CLASSES = len(SEMANTIC_CLASSES)
+
+# GSAM prompts format (for compatibility with original eDS output)
+# Format: [description, threshold1, threshold2, [r, g, b, a]]
+GSAM_PROMPTS = [
+    ['ground, sidewalk', 0.2, 0.28, [0.1, 0.1, 0.1, 0.7]],
+    ['stairs', 0.4, 0.4, [0.7, 0.7, 0.7, 0.7]],
+    ['door, wood door, steel door, glass door, elevator door', 0.55, 0.5, [0.0, 0.7, 0.0, 0.7]],
+    ['wall, pillar', 0.47, 0.3, [0.7, 0.0, 0.0, 0.7]],
+    ['bin, chair, bench, desk, plants, curb, bushes, pole, tree', 0.55, 0.5, [0.0, 0.0, 0.7, 0.7]],
+    ['people, person, pedestrian', 0.5, 0.5, [0.05, 0.7, 0.7, 0.7]],
+    ['grass, field, sand, hill, earth, dirt', 0.5, 0.5, [0.5, 0.5, 0.5, 0.7]],
+]
 
 # ADE20K -> 8 class mapping table (ade2our)
 # ADE20K has 150 classes, index 0 is background, 1-150 are categories
 # Index i maps ADE20K class i-1 to our target class
+# Our classes: 0=floor, 1=stair, 2=door, 3=wall, 4=obstacle, 5=human, 6=terrain, 7=other
 ADE2OUR = np.array([
     7,  # 0: background -> other
-    3,  # 1: wall -> wall (idx 1 in our classes, but we use 3 for wall)
+    3,  # 1: wall -> wall
     3,  # 2: building -> wall
     7,  # 3: sky -> other
     0,  # 4: floor -> floor
@@ -67,7 +81,7 @@ ADE2OUR = np.array([
     0,  # 12: sidewalk -> floor
     5,  # 13: person -> human
     6,  # 14: earth -> terrain
-    2,  # 15: door -> stair (originally door, but ade20k mapping)
+    2,  # 15: door -> door
     4,  # 16: table -> obstacle
     7,  # 17: mountain -> other
     4,  # 18: plant -> obstacle
@@ -106,13 +120,13 @@ ADE2OUR = np.array([
     4,  # 51: refrigerator -> obstacle
     7,  # 52: grandstand -> other
     0,  # 53: path -> floor
-    2,  # 54: stairs -> stair
+    1,  # 54: stairs -> stair
     0,  # 55: runway -> floor
     4,  # 56: case -> obstacle
     4,  # 57: pool table -> obstacle
     4,  # 58: pillow -> obstacle
-    2,  # 59: screen door -> stair
-    2,  # 60: stairway -> stair
+    2,  # 59: screen door -> door
+    1,  # 60: stairway -> stair
     4,  # 61: river -> obstacle
     3,  # 62: bridge -> wall
     4,  # 63: bookcase -> obstacle
@@ -149,7 +163,7 @@ ADE2OUR = np.array([
     4,  # 94: pole -> obstacle
     0,  # 95: land -> floor
     4,  # 96: bannister -> obstacle
-    2,  # 97: escalator -> stair
+    1,  # 97: escalator -> stair
     4,  # 98: ottoman -> obstacle
     4,  # 99: bottle -> obstacle
     4,  # 100: buffet -> obstacle
@@ -174,7 +188,7 @@ ADE2OUR = np.array([
     4,  # 119: oven -> obstacle
     4,  # 120: ball -> obstacle
     4,  # 121: food -> obstacle
-    2,  # 122: step -> stair
+    1,  # 122: step -> stair
     4,  # 123: tank -> obstacle
     4,  # 124: trade name -> obstacle
     4,  # 125: microwave -> obstacle
@@ -235,7 +249,7 @@ class Config:
     window_sz: int = 32
     resample_hz: int = 20
     calib_fac: float = 1.0
-    sample_ratio: float = 0.3
+    sample_ratio: float = 0.4
 
     def __post_init__(self):
         if self.intrinsics is None:

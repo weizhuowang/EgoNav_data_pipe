@@ -86,6 +86,9 @@ class DataExtractor:
         self._video_idx = 0
         self._pano_idx = 0
 
+        # Valid start index (cut data before first pc/video)
+        self._valid_start = 0
+
         # Data row list
         self._data_lines: List[List[float]] = []
 
@@ -148,11 +151,10 @@ class DataExtractor:
             self._extract_panorama(msg, timestamp)
             new_entry = True
 
-        # Color image
+        # Color image (always extract for segmentation)
         elif topic == topics.get('color'):
-            if save_video:
-                self._extract_video(msg, timestamp)
-                new_entry = True
+            self._extract_video(msg, timestamp)
+            new_entry = True
 
         # Depth image (ROS2)
         elif topic == topics.get('depth'):
@@ -248,6 +250,10 @@ class DataExtractor:
         self.data.pc_frame.append(pc_data)
         self._pc_idx = len(self.data.pc_t) - 1
 
+        # Update valid_start on first point cloud
+        if self._pc_idx == 0:
+            self._valid_start = max(len(self._data_lines), self._valid_start)
+
     def _extract_panorama(self, msg: Any, timestamp: float):
         """Extract panorama (ROS1)"""
         try:
@@ -273,6 +279,10 @@ class DataExtractor:
             self.data.video_t.append(timestamp)
             self.data.video_frame.append(img)
             self._video_idx = len(self.data.video_t) - 1
+
+            # Update valid_start on first video frame
+            if self._video_idx == 0:
+                self._valid_start = max(len(self._data_lines), self._valid_start)
         except Exception as e:
             print(f"Warning: Failed to extract video: {e}")
 
@@ -387,6 +397,11 @@ class DataExtractor:
             print("Warning: Not enough data to resample")
             return
 
+        # Cut data before valid_start (before first pc/video)
+        if self._valid_start > 0:
+            print(f"Cutting {self._valid_start} entries before first pc/video")
+            self.data.data_array = self.data.data_array[self._valid_start:]
+
         print(f"Resampling to {hz} Hz...")
         data_t = self.data.data_array[:, 0]
         t_start = data_t[0]
@@ -394,7 +409,8 @@ class DataExtractor:
         t_step = 1.0 / hz
 
         resampled = []
-        for t in tqdm(np.arange(t_start, t_end - 1, t_step)):
+        # Match original: t_end + 0.5*t_step - 1 (remove last ~1 second)
+        for t in tqdm(np.arange(t_start, t_end + 0.5 * t_step - 1, t_step)):
             idx = np.argmin(np.abs(data_t - t))
             line = [t] + list(self.data.data_array[idx, 1:])
             resampled.append(line)

@@ -28,11 +28,18 @@ class SemanticLabeler:
             return
 
         try:
+            import sys
             import torch
             import mmcv
             import urllib
             from mmcv.runner import load_checkpoint
             from mmseg.apis import init_segmentor
+
+            # Add dinov2 repo to path and register model
+            DINOV2_REPO = "/afs/cs.stanford.edu/u/weizhuo2/Documents/gits/dinov2"
+            if DINOV2_REPO not in sys.path:
+                sys.path.append(DINOV2_REPO)
+            import dinov2.eval.segmentation_m2f.models.segmentors
 
             # DINOv2 configuration and weights
             DINOV2_BASE_URL = "https://dl.fbaipublicfiles.com/dinov2"
@@ -44,6 +51,9 @@ class SemanticLabeler:
                 cfg_str = f.read().decode()
 
             cfg = mmcv.Config.fromstring(cfg_str, file_format=".py")
+
+            # Optimization: use 'whole' mode for faster inference (600ms -> 380ms)
+            cfg.model.test_cfg.mode = "whole"
 
             print("Loading DINOv2 model...")
             self.model = init_segmentor(cfg)
@@ -193,12 +203,12 @@ class SimpleLabelProjector:
         return points.astype(np.float32)
 
 
-# Semantic class visualization colors
+# Semantic class visualization colors (matches original prompts order)
 CLASS_COLORS = [
     [0.1, 0.1, 0.1, 0.7],    # 0: floor - dark
-    [0.7, 0.0, 0.0, 0.7],    # 1: wall - red
-    [0.7, 0.7, 0.7, 0.7],    # 2: stair - gray
-    [0.0, 0.7, 0.0, 0.7],    # 3: door - green
+    [0.7, 0.7, 0.7, 0.7],    # 1: stair - gray
+    [0.0, 0.7, 0.0, 0.7],    # 2: door - green
+    [0.7, 0.0, 0.0, 0.7],    # 3: wall - red
     [0.0, 0.0, 0.7, 0.7],    # 4: obstacle - blue
     [0.05, 0.7, 0.7, 0.7],   # 5: human - cyan
     [0.5, 0.5, 0.5, 0.7],    # 6: terrain - gray

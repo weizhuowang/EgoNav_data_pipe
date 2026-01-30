@@ -28,7 +28,7 @@ import time
 import numpy as np
 from typing import Dict, Optional
 
-from config import Config
+from config import Config, GSAM_PROMPTS
 from bag_reader import BagReader
 from data_extractor import DataExtractor
 from pointcloud import PointCloudProcessor
@@ -45,7 +45,8 @@ def process_bag(
     do_seg: bool = True,
     do_resample: bool = True,
     viz: bool = False,
-    save_video: bool = False
+    save_video: bool = False,
+    prefix: str = 'eDS20HZVZS'
 ) -> str:
     """
     Process bag file and generate training dataset
@@ -104,8 +105,9 @@ def process_bag(
     # 6. Panorama generation / Semantic segmentation
     print("\n[6/6] Processing panoramas...")
 
-    if do_seg and data_dict.get('video_frame'):
-        # Full pipeline: Semantic segmentation -> Point cloud -> Panorama
+    if do_seg:
+        if not data_dict.get('video_frame'):
+            raise ValueError("--do-seg requires video_frame data, but none found in bag!")
         print("Running semantic segmentation pipeline...")
         _run_segmentation_pipeline(extractor, config, viz)
     elif data_dict.get('pc_frame'):
@@ -113,34 +115,34 @@ def process_bag(
         print("Generating panoramas from point clouds (no segmentation)...")
         extractor.convert_pc_to_global()
         extractor.generate_panoramas(window_sz=config.window_sz)
+    else:
+        raise ValueError("No pc_frame data found in bag!")
 
     # Get final data
     final_dict = extractor.get_data_dict()
 
-    # Convert panorama format
+    # Keep original format: (N, H, W, 11) - RGB(3) + D(1) + Seg_onehot(7)
     if 'pano_frame' in final_dict and len(final_dict['pano_frame']) > 0:
-        pano = np.array(final_dict['pano_frame'])
-        print(f"Panorama shape before conversion: {pano.shape}")
-
-        # If 11 channels, convert to 5 channels
-        if pano.ndim == 4 and pano.shape[-1] == 11:
-            pano = convert_pano_to_5ch(pano)
-            print(f"Panorama shape after 5ch conversion: {pano.shape}")
-
-        # Crop height
-        if pano.shape[2] > 140:
-            pano = crop_pano_height(pano, target_height=140)
-            print(f"Panorama shape after crop: {pano.shape}")
-
+        pano = np.array(final_dict['pano_frame'], dtype=np.float32)
+        print(f"Panorama shape: {pano.shape}")
         final_dict['pano_frame'] = pano
 
-    # Save
+    # Add prompts (GSAM format) - match original eDS format
+    final_dict['prompts'] = GSAM_PROMPTS
+
+    # Remove large intermediate data not needed in final output
+    # (pc_frame and video_frame are only used during processing)
+    final_dict.pop('pc_frame', None)
+    final_dict.pop('video_frame', None)
+
+    # Save (full dict, not minimal)
     print("\nSaving training set...")
     writer = TrainingSetWriter(output_dir)
-    output_path = writer.save_minimal(
+    output_path = writer.save(
         final_dict,
-        prefix='eDS20HZVZS',
-        bag_name=bag_path
+        prefix=prefix,
+        bag_name=bag_path,
+        compress=True
     )
 
     t_total_end = time.time()
@@ -172,15 +174,8 @@ def _run_segmentation_pipeline(
 
     # Load segmentation model
     print("Loading segmentation model...")
-    try:
-        labeler = SemanticLabeler(device='cuda')
-        labeler.load_model()
-    except Exception as e:
-        print(f"Warning: Failed to load segmentation model: {e}")
-        print("Falling back to panorama generation without segmentation")
-        extractor.convert_pc_to_global()
-        extractor.generate_panoramas(window_sz=config.window_sz)
-        return
+    labeler = SemanticLabeler(device='cuda')
+    labeler.load_model()
 
     # Find video frame indices that need segmentation (corresponding to point clouds)
     pc_t = np.array(data_dict['pc_t'])
@@ -204,18 +199,24 @@ def _run_segmentation_pipeline(
     print("Projecting segmentation to point clouds...")
     projector = SimpleLabelProjector(config.intrinsics)
     pc_processor = PointCloudProcessor(config)
+    depth_processor = DepthProcessor(config)
 
     pc_frame_glob = []
+    depth_frames_generated = []  # Store generated depth frames
+
     for i in tqdm(range(len(seg_frames))):
         video_idx = video_idxs[i]
         video_frame = data_dict['video_frame'][video_idx]
-        depth_frame = data_dict['depth_frame'][i] if 'depth_frame' in data_dict else None
+        depth_frame = data_dict['depth_frame'][i] if 'depth_frame' in data_dict and i < len(data_dict['depth_frame']) else None
 
         if depth_frame is None:
             # Generate depth map from point cloud
             pc = data_dict['pc_frame'][i]
-            depth_processor = DepthProcessor(config)
             depth_frame = depth_processor.pointcloud_to_depth(pc)[:, :, 0]
+            # DepthProcessor normalizes depth to 0-1 (10m=1.0), restore to actual meters
+            depth_frame = depth_frame * 10.0
+
+        depth_frames_generated.append(depth_frame)
 
         # Ensure segmentation and depth are consistent
         seg = seg_frames[i] * np.sign(depth_frame[:, :, np.newaxis])
@@ -231,6 +232,10 @@ def _run_segmentation_pipeline(
 
         pc_frame_glob.append([pc_world])  # Wrap in list to match original format
 
+    # Save generated depth frames to extractor
+    if not extractor.data.depth_frame or len(extractor.data.depth_frame) == 0:
+        extractor.data.depth_frame = depth_frames_generated
+
     # Generate panoramas
     print("Generating panoramas with segmentation...")
     pano_renderer = PanoramaRenderer(
@@ -241,6 +246,11 @@ def _run_segmentation_pipeline(
 
     pano_frames = []
     pano_t = data_dict['pano_t']
+
+    # # DEBUG: limit to first 500 frames
+    # DEBUG_LIMIT = 500
+    # pano_t = pano_t[:DEBUG_LIMIT]
+    # print(f"DEBUG: limiting to first {DEBUG_LIMIT} pano frames")
 
     for i, t in enumerate(tqdm(pano_t)):
         pos, quat = extractor.find_nearest_pose(t)
@@ -328,6 +338,10 @@ def main():
         '--save-video', action='store_true',
         help='Save video frames to output'
     )
+    parser.add_argument(
+        '--prefix', type=str, default='eDS20HZVZS',
+        help='Output filename prefix (default: eDS20HZVZS)'
+    )
 
     args = parser.parse_args()
 
@@ -347,7 +361,8 @@ def main():
         do_seg=not args.no_seg,
         do_resample=not args.no_resample,
         viz=args.viz,
-        save_video=args.save_video
+        save_video=args.save_video,
+        prefix=args.prefix
     )
 
 

@@ -213,3 +213,57 @@ print('data_array match:', np.allclose(old['data_array'], new['data_array']))
 # 期望 pano_frame: (N, 180, 360, 5) 或裁剪后 (N, 140, 360, 5)
 # 期望 data_array: (M, 25)
 ```
+
+## 快速运行指南
+
+### 环境
+必须在 `GSAM` conda 环境中运行:
+```bash
+conda activate GSAM
+```
+
+### 文件路径
+- Bag 文件: `/arm/u/weizhuo2/Documents/Data_pipe/Bags/`
+- 输出目录: `/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/V2_test/`
+- 原始 eDS 参考: `/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/`
+
+### 运行命令
+```bash
+cd /arm/u/weizhuo2/Documents/Data_pipe/Scripts/V2
+
+# 完整运行 (带语义分割)
+python data_pipe_V2.py \
+    --bag /arm/u/weizhuo2/Documents/Data_pipe/Bags/V2DataRedo_field_lag.bag \
+    --output /arm/u/weizhuo2/Documents/Data_pipe/Training_sets/V2_test \
+    --prefix V2TEST{version_number}
+```
+
+### 输出格式
+V2 输出应与原始 eDS 完全一致:
+
+### DEBUG 模式
+代码中有 两处`DEBUG_LIMIT = 500` 限制全景帧数。
+确认输出正确后，注释掉该行以生成完整数据集。
+
+## Bug 修复记录
+
+### 2025-01-30: data_array 长度不匹配
+**问题**: V2 的 data_array 长度 (3842) 与原始 eDS (3791) 不一致
+
+**原因**: 原始代码有 `valid_start` 逻辑，在 resample 前剪掉第一个 pc/video 之前的数据
+
+**修复**: 在 `data_extractor.py` 中添加:
+1. `_valid_start` 成员变量
+2. 在 `_extract_video()` 和 `_extract_pointcloud()` 中更新 `_valid_start`
+3. 在 `resample()` 开始时剪掉 `_valid_start` 之前的数据
+
+### 2025-01-30: 全景图稀疏 (RGB mean ~14 vs ~57)
+**问题**: V2 全景 RGB 均值只有 14，原始 eDS 是 57
+
+**原因**: `DepthProcessor.pointcloud_to_depth()` 归一化深度到 0-1，但 `SimpleLabelProjector` 直接使用该值做反投影
+
+**修复**: 在 `data_pipe_V2.py` 的 `_run_segmentation_pipeline()` 中:
+```python
+depth_frame = depth_processor.pointcloud_to_depth(pc)[:, :, 0]
+depth_frame = depth_frame * 10.0  # 恢复实际米数
+```
