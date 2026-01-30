@@ -10,3 +10,6 @@ Bags/leo_data
 */__pycache__
 *.egg-info/
 *.so
+Training_sets/
+**/build
+Bags/

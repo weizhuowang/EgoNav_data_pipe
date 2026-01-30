@@ -8,6 +8,7 @@ Example:
     python extract_video_mmap.py V2DataRedo_realsense0801_lag
 """
 
+import os
 import sys
 import numpy as np
 import joblib
@@ -22,8 +23,13 @@ TARGET_SIZE = (240, 432)  # H, W
 
 
 def main(dataset_name):
+    # Support both V20HZVZS and DS20HZVZS formats
     v20_path = f"{TRAINING_SETS_DIR}/V20HZVZS_{dataset_name}"
-    mmap_path = f"{MMAP_DIR}/eDS20HZVZS_{dataset_name}_video_uint8"
+    prefix = "eDS20HZVZS"
+    if not os.path.exists(v20_path):
+        v20_path = f"{TRAINING_SETS_DIR}/DS20HZVZS_{dataset_name}"
+        prefix = "DS20HZVZS"
+    mmap_path = f"{MMAP_DIR}/{prefix}_{dataset_name}_video_uint8"
 
     print(f"Loading: {v20_path}")
     v20 = joblib.load(v20_path)
@@ -35,7 +41,10 @@ def main(dataset_name):
 
     print(f"Creating mmap: {mmap_path}")
     mmap_array = np.lib.format.open_memmap(
-        mmap_path, mode="w+", dtype=np.uint8, shape=(n_frames, TARGET_SIZE[0], TARGET_SIZE[1], 3)
+        mmap_path,
+        mode="w+",
+        dtype=np.uint8,
+        shape=(n_frames, TARGET_SIZE[0], TARGET_SIZE[1], 3),
     )
 
     for i, frame in enumerate(tqdm(video_frames)):
@@ -45,18 +54,18 @@ def main(dataset_name):
 
     mmap_array.flush()
     print("Done!")
-    return mmap_array
+    return mmap_array, prefix
 
 
-def extract_dinov3(dataset_name, video=None, batch_size=32):
+def extract_dinov3(dataset_name, video=None, batch_size=32, prefix="eDS20HZVZS"):
     """Extract DINOv3 patch features, save as (N, 15, 27, 384)."""
     import torch
     from torchvision.transforms import v2
 
-    out_path = f"{MMAP_DIR}/eDS20HZVZS_{dataset_name}_dinov3_patch_fp16"
+    out_path = f"{MMAP_DIR}/{prefix}_{dataset_name}_dinov3_patch_fp16"
 
     if video is None:
-        video_path = f"{MMAP_DIR}/eDS20HZVZS_{dataset_name}_video_uint8"
+        video_path = f"{MMAP_DIR}/{prefix}_{dataset_name}_video_uint8"
         print(f"Loading video: {video_path}")
         video = np.load(video_path, mmap_mode="r")
 
@@ -113,5 +122,5 @@ def extract_dinov3(dataset_name, video=None, batch_size=32):
 
 
 if __name__ == "__main__":
-    video = main(sys.argv[1])
-    extract_dinov3(sys.argv[1], video=video)
+    video, prefix = main(sys.argv[1])
+    extract_dinov3(sys.argv[1], video=video, prefix=prefix)
