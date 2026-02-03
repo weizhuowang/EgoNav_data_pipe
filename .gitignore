@@ -7,7 +7,7 @@ Training_sets/Backup
 Training_sets/Sims
 Training_sets/videos
 Bags/leo_data
-*/__pycache__
+**/__pycache__
 *.egg-info/
 *.so
 Training_sets/

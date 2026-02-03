@@ -267,3 +267,61 @@ V2 输出应与原始 eDS 完全一致:
 depth_frame = depth_processor.pointcloud_to_depth(pc)[:, :, 0]
 depth_frame = depth_frame * 10.0  # 恢复实际米数
 ```
+
+### 2025-01-31: depth_frame 范围不一致 & remove_edges 未统一应用
+**问题**: 
+1. 从 bag 读取的 depth_frame 是米，但老 pipeline 的 depth_frame 是 0-1 范围
+2. 只有从 pointcloud 生成的 depth_frame 调用了 remove_edges
+
+**修复**:
+1. `data_extractor.py`: 读取 depth 时转为 0-1 范围 (10m=1.0)
+   - 16UC1: `depth / 10000.0` (mm → 0-1)
+   - 32FC1: `depth / 10.0` (m → 0-1)
+2. `data_pipe_V2.py`: 所有 depth_frame 统一调用 remove_edges，存储时保持 0-1 范围
+
+**depth_frame 数据流**:
+```
+来源 (0-1) → remove_edges (0-1) → 存储 (0-1) → 使用时 *10 (米)
+```
+
+### 2025-02-02: depth_frame 和 panorama 左上角缺失三角形
+**问题**: V2 输出的 depth_frame 和 panorama 左上角有大片区域缺失
+
+**原因**: `data_extractor.py` 的 `_extract_pointcloud()` 有两个问题:
+1. 使用 `pointcloud2_to_xyz_array()` 只提取 xyz，丢失了 RGB
+2. 错误的过滤条件 `np.sum(pc_data, axis=1) > 0.3` (x+y+z > 0.3)
+   - 这个条件没有物理意义，导致左上角的点（x<0, y<0）被错误过滤
+
+**修复**: 改为和原始 pipeline 一致的方法:
+```python
+# 之前 (错误)
+pc_data = rnp.point_cloud2.pointcloud2_to_xyz_array(msg, remove_nans=True)
+valid = np.sum(pc_data, axis=1) > 0.3  # 错误的过滤条件
+pc_data = pc_data[valid]
+
+# 现在 (正确)
+msg.__class__ = sensor_msgs.msg.PointCloud2
+pc_data = fixrgb(rnp.numpify(msg))  # xyz+rgb, 无额外过滤
+```
+
+## 数据格式说明
+
+### 输出文件格式
+- 格式: `joblib` + `lz4` 压缩
+- 加载: `joblib.load(filepath)`
+
+### Keys
+| Key | Shape | 说明 |
+|-----|-------|------|
+| pano_t | (N,) | 全景时间戳 |
+| pano_frame | (N, 180, 360, 11) | 全景帧 (R,G,B,D,sem*5,occ*2) |
+| video_t | (M,) | 视频时间戳 |
+| pc_t | (K,) | 点云时间戳 |
+| depth_frame | (K, H, W, 1) | 深度图 (范围 0-1, 10m=1.0) |
+| data_array | (L, 25) | 重采样后的状态数据 |
+| prompts | list | 语义类别名称 |
+
+### depth_frame 范围
+- **存储**: 0-1 (10m = 1.0)
+- **使用**: 乘以 10 转为米
+- **处理**: 所有 depth_frame 都经过 remove_edges (Canny + dilate)

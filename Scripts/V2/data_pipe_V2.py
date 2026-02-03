@@ -46,7 +46,7 @@ def process_bag(
     do_resample: bool = True,
     viz: bool = False,
     save_video: bool = False,
-    prefix: str = 'eDS20HZVZS'
+    prefix: str = "eDS20HZVZS",
 ) -> str:
     """
     Process bag file and generate training dataset
@@ -106,11 +106,13 @@ def process_bag(
     print("\n[6/6] Processing panoramas...")
 
     if do_seg:
-        if not data_dict.get('video_frame'):
-            raise ValueError("--do-seg requires video_frame data, but none found in bag!")
+        if not data_dict.get("video_frame"):
+            raise ValueError(
+                "--do-seg requires video_frame data, but none found in bag!"
+            )
         print("Running semantic segmentation pipeline...")
         _run_segmentation_pipeline(extractor, config, viz)
-    elif data_dict.get('pc_frame'):
+    elif data_dict.get("pc_frame"):
         # Simplified pipeline: Generate panorama from point cloud (no segmentation)
         print("Generating panoramas from point clouds (no segmentation)...")
         extractor.convert_pc_to_global()
@@ -122,27 +124,24 @@ def process_bag(
     final_dict = extractor.get_data_dict()
 
     # Keep original format: (N, H, W, 11) - RGB(3) + D(1) + Seg_onehot(7)
-    if 'pano_frame' in final_dict and len(final_dict['pano_frame']) > 0:
-        pano = np.array(final_dict['pano_frame'], dtype=np.float32)
+    if "pano_frame" in final_dict and len(final_dict["pano_frame"]) > 0:
+        pano = np.array(final_dict["pano_frame"], dtype=np.float32)
         print(f"Panorama shape: {pano.shape}")
-        final_dict['pano_frame'] = pano
+        final_dict["pano_frame"] = pano
 
     # Add prompts (GSAM format) - match original eDS format
-    final_dict['prompts'] = GSAM_PROMPTS
+    final_dict["prompts"] = GSAM_PROMPTS
 
     # Remove large intermediate data not needed in final output
     # (pc_frame and video_frame are only used during processing)
-    final_dict.pop('pc_frame', None)
-    final_dict.pop('video_frame', None)
+    final_dict.pop("pc_frame", None)
+    final_dict.pop("video_frame", None)
 
     # Save (full dict, not minimal)
     print("\nSaving training set...")
     writer = TrainingSetWriter(output_dir)
     output_path = writer.save(
-        final_dict,
-        prefix=prefix,
-        bag_name=bag_path,
-        compress=True
+        final_dict, prefix=prefix, bag_name=bag_path, compress=True
     )
 
     t_total_end = time.time()
@@ -155,9 +154,7 @@ def process_bag(
 
 
 def _run_segmentation_pipeline(
-    extractor: DataExtractor,
-    config: Config,
-    viz: bool = False
+    extractor: DataExtractor, config: Config, viz: bool = False
 ):
     """
     Run semantic segmentation pipeline
@@ -174,12 +171,12 @@ def _run_segmentation_pipeline(
 
     # Load segmentation model
     print("Loading segmentation model...")
-    labeler = SemanticLabeler(device='cuda')
+    labeler = SemanticLabeler(device="cuda")
     labeler.load_model()
 
     # Find video frame indices that need segmentation (corresponding to point clouds)
-    pc_t = np.array(data_dict['pc_t'])
-    video_t = np.array(data_dict['video_t'])
+    pc_t = np.array(data_dict["pc_t"])
+    video_t = np.array(data_dict["video_t"])
 
     video_idxs = []
     for t in pc_t:
@@ -191,7 +188,7 @@ def _run_segmentation_pipeline(
     print("Segmenting video frames...")
     seg_frames = []
     for idx in tqdm(video_idxs):
-        frame = data_dict['video_frame'][idx][:, :, ::-1]  # RGB -> BGR for DINOv2
+        frame = data_dict["video_frame"][idx][:, :, ::-1]  # RGB -> BGR for DINOv2
         seg = labeler.segment(frame)
         seg_frames.append(seg)
 
@@ -206,24 +203,37 @@ def _run_segmentation_pipeline(
 
     for i in tqdm(range(len(seg_frames))):
         video_idx = video_idxs[i]
-        video_frame = data_dict['video_frame'][video_idx]
-        depth_frame = data_dict['depth_frame'][i] if 'depth_frame' in data_dict and i < len(data_dict['depth_frame']) else None
+        video_frame = data_dict["video_frame"][video_idx]
+        depth_frame = (
+            data_dict["depth_frame"][i]
+            if "depth_frame" in data_dict and i < len(data_dict["depth_frame"])
+            else None
+        )
 
         if depth_frame is None:
-            # Generate depth map from point cloud
-            pc = data_dict['pc_frame'][i]
+            # Generate depth map from point cloud (range 0-1, 10m=1.0)
+            pc = data_dict["pc_frame"][i]
             depth_frame = depth_processor.pointcloud_to_depth(pc)[:, :, 0]
-            # DepthProcessor normalizes depth to 0-1 (10m=1.0), restore to actual meters
-            depth_frame = depth_frame * 10.0
+        else:
+            # Ensure 2D
+            if depth_frame.ndim == 3:
+                depth_frame = depth_frame[:, :, 0]
 
-        depth_frames_generated.append(depth_frame)
+        # Remove edges (same as original pipeline, expects 0-1 range)
+        depth_frame = depth_processor.remove_edges(depth_frame).squeeze()
+
+        # Store in 0-1 range (same as original pipeline), keep shape (H, W, 1)
+        depth_frames_generated.append(depth_frame[:, :, np.newaxis].copy())
+
+        # Convert to meters for projection
+        depth_meters = depth_frame * 10.0
 
         # Ensure segmentation and depth are consistent
-        seg = seg_frames[i] * np.sign(depth_frame[:, :, np.newaxis])
+        seg = seg_frames[i] * np.sign(depth_meters[:, :, np.newaxis])
 
         # Project to point cloud
         pc_local = projector.project_seg_to_pointcloud(
-            depth_frame, seg, video_frame, min_depth=0.3
+            depth_meters, seg, video_frame, min_depth=0.3
         )
 
         # Transform to global coordinate system
@@ -239,25 +249,24 @@ def _run_segmentation_pipeline(
     # Generate panoramas
     print("Generating panoramas with segmentation...")
     pano_renderer = PanoramaRenderer(
-        width=config.pano_width,
-        height=config.pano_height,
-        view_dist=config.view_dist
+        width=config.pano_width, height=config.pano_height, view_dist=config.view_dist
     )
 
     pano_frames = []
-    pano_t = data_dict['pano_t']
+    pano_t = data_dict["pano_t"]
 
     # # DEBUG: limit to first 500 frames
-    # DEBUG_LIMIT = 500
-    # pano_t = pano_t[:DEBUG_LIMIT]
-    # print(f"DEBUG: limiting to first {DEBUG_LIMIT} pano frames")
+    # DEBUG: limit to first N pano frames
+    DEBUG_LIMIT = 300
+    pano_t = pano_t[:DEBUG_LIMIT]
+    print(f"DEBUG: limiting to first {DEBUG_LIMIT} pano frames")
 
     for i, t in enumerate(tqdm(pano_t)):
         pos, quat = extractor.find_nearest_pose(t)
 
         # Yaw matrix (horizon lock)
-        euler = R.from_quat(quat).as_euler('ZYX')
-        yaw_matrix = R.from_euler('ZYX', [euler[0], 0, 0]).as_matrix()
+        euler = R.from_quat(quat).as_euler("ZYX")
+        yaw_matrix = R.from_euler("ZYX", [euler[0], 0, 0]).as_matrix()
 
         # Window selection
         pc_idx = np.sum(pc_t < t)
@@ -267,10 +276,12 @@ def _run_segmentation_pipeline(
         pc_window = pc_frame_glob[window_l:window_r]
 
         # Render panorama
-        pano = pano_renderer.render_with_seg(
-            pc_window, pos, yaw_matrix,
+        pano = pano_renderer.render(
+            pc_window,
+            pos,
+            yaw_matrix,
             filter_dist=True,
-            sample_ratio=config.sample_ratio
+            sample_ratio=config.sample_ratio,
         )
         pano_frames.append(pano)
 
@@ -278,13 +289,14 @@ def _run_segmentation_pipeline(
         if viz and i % 10 == 0:
             try:
                 import matplotlib.pyplot as plt
+
                 plt.clf()
                 plt.subplot(121)
                 plt.imshow(pano[:, :, :3].astype(np.uint8))
-                plt.title('RGB')
+                plt.title("RGB")
                 plt.subplot(122)
                 plt.imshow(np.argmax(pano[:, :, 4:], axis=-1))
-                plt.title('Segmentation')
+                plt.title("Segmentation")
                 plt.pause(0.1)
             except:
                 pass
@@ -294,53 +306,48 @@ def _run_segmentation_pipeline(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Data Pipeline V2 - Convert bag to training dataset',
+        description="Data Pipeline V2 - Convert bag to training dataset",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__
+        epilog=__doc__,
     )
     parser.add_argument(
-        '--bag', '-b', required=True,
-        help='Path to ROS1 bag or ROS2 mcap file'
+        "--bag", "-b", required=True, help="Path to ROS1 bag or ROS2 mcap file"
+    )
+    parser.add_argument("--output", "-o", required=True, help="Output directory")
+    parser.add_argument(
+        "--no-seg", action="store_true", help="Skip semantic segmentation"
+    )
+    parser.add_argument("--no-resample", action="store_true", help="Skip resampling")
+    parser.add_argument(
+        "--hz", type=int, default=20, help="Resample frequency (default: 20)"
     )
     parser.add_argument(
-        '--output', '-o', required=True,
-        help='Output directory'
+        "--window-sz",
+        type=int,
+        default=32,
+        help="Point cloud window size for panorama (default: 32)",
     )
     parser.add_argument(
-        '--no-seg', action='store_true',
-        help='Skip semantic segmentation'
+        "--view-dist",
+        type=float,
+        default=10.0,
+        help="View distance for panorama (default: 10.0)",
     )
     parser.add_argument(
-        '--no-resample', action='store_true',
-        help='Skip resampling'
+        "--sample-ratio",
+        type=float,
+        default=0.4,
+        help="Point cloud sample ratio (default: 0.4)",
+    )
+    parser.add_argument("--viz", action="store_true", help="Show visualization")
+    parser.add_argument(
+        "--save-video", action="store_true", help="Save video frames to output"
     )
     parser.add_argument(
-        '--hz', type=int, default=20,
-        help='Resample frequency (default: 20)'
-    )
-    parser.add_argument(
-        '--window-sz', type=int, default=32,
-        help='Point cloud window size for panorama (default: 32)'
-    )
-    parser.add_argument(
-        '--view-dist', type=float, default=10.0,
-        help='View distance for panorama (default: 10.0)'
-    )
-    parser.add_argument(
-        '--sample-ratio', type=float, default=0.3,
-        help='Point cloud sample ratio (default: 0.3)'
-    )
-    parser.add_argument(
-        '--viz', action='store_true',
-        help='Show visualization'
-    )
-    parser.add_argument(
-        '--save-video', action='store_true',
-        help='Save video frames to output'
-    )
-    parser.add_argument(
-        '--prefix', type=str, default='eDS20HZVZS',
-        help='Output filename prefix (default: eDS20HZVZS)'
+        "--prefix",
+        type=str,
+        default="eDS20HZVZS",
+        help="Output filename prefix (default: eDS20HZVZS)",
     )
 
     args = parser.parse_args()
@@ -350,7 +357,7 @@ def main():
         resample_hz=args.hz,
         window_sz=args.window_sz,
         view_dist=args.view_dist,
-        sample_ratio=args.sample_ratio
+        sample_ratio=args.sample_ratio,
     )
 
     # Process
@@ -362,9 +369,9 @@ def main():
         do_resample=not args.no_resample,
         viz=args.viz,
         save_video=args.save_video,
-        prefix=args.prefix
+        prefix=args.prefix,
     )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

@@ -226,25 +226,16 @@ class DataExtractor:
         """Extract point cloud (ROS1)"""
         try:
             import ros_numpy as rnp
+            import sensor_msgs
             from depth_processor import fixrgb
         except ImportError:
             print("Warning: ros_numpy not available, skipping pointcloud")
             return
 
-        # Convert point cloud
-        pc_data = rnp.point_cloud2.pointcloud2_to_xyz_array(msg, remove_nans=True)
-        pc_data = pc_data.reshape(-1, 3)
-
-        # Filter zero points
-        valid = np.sum(pc_data, axis=1) > 0.3
-        pc_data = pc_data[valid]
-
-        # Apply calibration factor
-        pc_data = pc_data * self.config.calib_fac
-
-        # Distance filtering
-        dist_sq = np.sum(pc_data**2, axis=1)
-        pc_data = pc_data[dist_sq < self.config.view_dist**2]
+        # Convert point cloud - same as original pipeline
+        # Use rnp.numpify + fixrgb to get xyz+rgb (6 channels)
+        msg.__class__ = sensor_msgs.msg.PointCloud2
+        pc_data = fixrgb(rnp.numpify(msg))
 
         self.data.pc_t.append(timestamp)
         self.data.pc_frame.append(pc_data)
@@ -296,16 +287,18 @@ class DataExtractor:
                 encoding = msg.encoding
 
                 if encoding == '16UC1':
-                    # 16-bit depth in mm
+                    # 16-bit depth in mm, convert to 0-1 range (10m=1.0)
                     depth = np.frombuffer(msg.data, dtype=np.uint16).reshape(H, W)
-                    depth = depth.astype(np.float32) / 1000.0  # mm to m
+                    depth = depth.astype(np.float32) / 10000.0  # mm to 0-1 (10m=1.0)
                 elif encoding == '32FC1':
+                    # 32-bit depth in meters, convert to 0-1 range (10m=1.0)
                     depth = np.frombuffer(msg.data, dtype=np.float32).reshape(H, W)
+                    depth = depth / 10.0  # m to 0-1 (10m=1.0)
                 else:
                     print(f"Warning: Unknown depth encoding: {encoding}")
                     return
 
-                self.data.depth_frame.append(depth)
+                self.data.depth_frame.append(depth[:, :, np.newaxis])
         except Exception as e:
             print(f"Warning: Failed to extract depth: {e}")
 
@@ -503,7 +496,7 @@ class DataExtractor:
             pc_window = self._pc_frame_glob[window_l:window_r]
 
             # Render panorama
-            pano = self.pano_renderer.render_depth_only(
+            pano = self.pano_renderer.render(
                 pc_window, pos, yaw_matrix, filter_dist=True
             )
             self.data.pano_frame.append(pano)
