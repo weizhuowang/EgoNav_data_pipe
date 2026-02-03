@@ -242,8 +242,15 @@ python data_pipe_V2.py \
 V2 输出应与原始 eDS 完全一致:
 
 ### DEBUG 模式
-代码中有 两处`DEBUG_LIMIT = 500` 限制全景帧数。
+代码中有 `DEBUG_LIMIT = 300` 限制全景帧数。
 确认输出正确后，注释掉该行以生成完整数据集。
+
+### C++ 加速
+全景图生成支持 C++ 加速 (`pano_cpp` 模块):
+- 位置: `/arm/u/weizhuo2/Documents/Data_pipe/Scripts/pano_cpp/`
+- 自动启用: 如果模块可用且输入为 13 通道 (xyz+rgb+seg*7)
+- 编译: `cd pano_cpp && pip install -e .`
+- 禁用: `PanoramaRenderer(use_cpp=False)`
 
 ## Bug 修复记录
 

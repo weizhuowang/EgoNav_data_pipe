@@ -6,6 +6,16 @@ import numpy as np
 from typing import List, Tuple
 from config import PANO_WIDTH, PANO_HEIGHT
 
+# Try to import C++ module
+try:
+    import sys
+    sys.path.insert(0, '/arm/u/weizhuo2/Documents/Data_pipe/Scripts/pano_cpp')
+    import pano_cpp
+    HAS_CPP = True
+except ImportError:
+    HAS_CPP = False
+    print("Warning: pano_cpp not available, using Python fallback")
+
 
 class PanoramaRenderer:
     """
@@ -19,17 +29,20 @@ class PanoramaRenderer:
         self,
         width: int = PANO_WIDTH,
         height: int = PANO_HEIGHT,
-        view_dist: float = 10.0
+        view_dist: float = 10.0,
+        use_cpp: bool = True
     ):
         """
         Args:
             width: Panorama width (default 360)
             height: Panorama height (default 180)
             view_dist: Maximum viewing distance (meters)
+            use_cpp: Use C++ implementation if available (default True)
         """
         self.width = width
         self.height = height
         self.view_dist = view_dist
+        self.use_cpp = use_cpp and HAS_CPP
 
         # Cylindrical projection parameters
         self.u_step = 1.0  # Horizontal resolution (degrees/pixel)
@@ -62,7 +75,7 @@ class PanoramaRenderer:
             - If C > 3: [data[:, 3:], depth] → matches original pipeline [RGB, D, seg]
             - If C == 3: [depth] only
         """
-        # Merge point clouds
+        # Filter valid frames
         valid_frames = []
         for pc in pc_frames:
             if isinstance(pc, list):
@@ -75,8 +88,15 @@ class PanoramaRenderer:
             pano = np.ones((self.height, self.width, 1), dtype=np.float32) * 255
             return pano
 
+        n_channels = valid_frames[0].shape[1]
+
+        # Use C++ multi-array version if available and input has 13 channels
+        # This avoids expensive np.concatenate in Python
+        if self.use_cpp and n_channels == 13:
+            return self._render_cpp_multi(valid_frames, curr_pos, yaw_matrix)
+
+        # Python fallback: need to concatenate
         total_pts = np.concatenate(valid_frames, axis=0)
-        n_channels = total_pts.shape[1]
         extra_channels = n_channels - 3  # Channels beyond xyz
 
         # Downsampling
@@ -85,6 +105,53 @@ class PanoramaRenderer:
             if n_keep < len(total_pts):
                 indices = np.random.choice(len(total_pts), n_keep, replace=False)
                 total_pts = total_pts[indices]
+
+        return self._render_python(total_pts, curr_pos, yaw_matrix, filter_dist)
+
+    def _render_cpp_multi(
+        self,
+        pc_frames: List[np.ndarray],
+        curr_pos: np.ndarray,
+        yaw_matrix: np.ndarray
+    ) -> np.ndarray:
+        """Render using C++ implementation with multiple arrays (avoids Python concatenate)."""
+        # Prepare inputs for C++ (need float32, C-contiguous)
+        clouds = [np.ascontiguousarray(pc, dtype=np.float32) for pc in pc_frames]
+        pos = np.ascontiguousarray(curr_pos, dtype=np.float32)
+        rot = np.ascontiguousarray(yaw_matrix.T, dtype=np.float32)  # C++ uses row-major
+
+        # Call C++ function (returns (180, 360, 11) with [rgb, d, seg*7])
+        pano = pano_cpp.generate_pano_multi(clouds, pos, rot, self.view_dist)
+
+        return pano
+
+    def _render_cpp(
+        self,
+        total_pts: np.ndarray,
+        curr_pos: np.ndarray,
+        yaw_matrix: np.ndarray
+    ) -> np.ndarray:
+        """Render using C++ implementation (single merged array)."""
+        # Prepare inputs for C++ (need float32, C-contiguous)
+        cloud = np.ascontiguousarray(total_pts, dtype=np.float32)
+        pos = np.ascontiguousarray(curr_pos, dtype=np.float32)
+        rot = np.ascontiguousarray(yaw_matrix.T, dtype=np.float32)  # C++ uses row-major
+
+        # Call C++ function (returns (180, 360, 11) with [rgb, d, seg*7])
+        pano = pano_cpp.generate_pano_fast(cloud, pos, rot, self.view_dist)
+
+        return pano
+
+    def _render_python(
+        self,
+        total_pts: np.ndarray,
+        curr_pos: np.ndarray,
+        yaw_matrix: np.ndarray,
+        filter_dist: bool = True
+    ) -> np.ndarray:
+        """Render using Python implementation."""
+        n_channels = total_pts.shape[1]
+        extra_channels = n_channels - 3
 
         # Transform to local coordinate system
         pts_local = total_pts.copy()

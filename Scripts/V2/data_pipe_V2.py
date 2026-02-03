@@ -255,11 +255,10 @@ def _run_segmentation_pipeline(
     pano_frames = []
     pano_t = data_dict["pano_t"]
 
-    # # DEBUG: limit to first 500 frames
-    # DEBUG: limit to first N pano frames
-    DEBUG_LIMIT = 300
-    pano_t = pano_t[:DEBUG_LIMIT]
-    print(f"DEBUG: limiting to first {DEBUG_LIMIT} pano frames")
+    # # DEBUG: limit to first N pano frames
+    # DEBUG_LIMIT = 300
+    # pano_t = pano_t[:DEBUG_LIMIT]
+    # print(f"DEBUG: limiting to first {DEBUG_LIMIT} pano frames")
 
     for i, t in enumerate(tqdm(pano_t)):
         pos, quat = extractor.find_nearest_pose(t)

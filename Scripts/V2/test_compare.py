@@ -13,7 +13,7 @@ matplotlib.use("TkAgg")
 
 # 路径
 # V2_PATH = "/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/V2_test/V2TEST_PANO500_V2DataRedo_field_lag"
-V2_PATH = "/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/V2_test/V2TEST5_V2DataRedo_field_lag"
+V2_PATH = "/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/V2_test/V2TEST7_V2DataRedo_field_lag"
 EDS_PATH = (
     "/arm/u/weizhuo2/Documents/Data_pipe/Training_sets/eDS20HZVZS_V2DataRedo_field_lag"
 )
