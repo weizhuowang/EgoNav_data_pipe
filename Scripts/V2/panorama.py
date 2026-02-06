@@ -90,9 +90,8 @@ class PanoramaRenderer:
 
         n_channels = valid_frames[0].shape[1]
 
-        # Use C++ multi-array version if available and input has 13 channels
-        # This avoids expensive np.concatenate in Python
-        if self.use_cpp and n_channels == 13:
+        # Use C++ multi-array version if available (supports any channel count >= 6)
+        if self.use_cpp and n_channels >= 6:
             return self._render_cpp_multi(valid_frames, curr_pos, yaw_matrix)
 
         # Python fallback: need to concatenate

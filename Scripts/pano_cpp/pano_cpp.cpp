@@ -45,8 +45,8 @@ py::array_t<float> generate_pano_cpp(
     auto pos_buf = pos.request();
     auto rot_buf = rot_matrix.request();
 
-    if (cloud_buf.ndim != 2 || cloud_buf.shape[1] < 13) {
-        throw std::runtime_error("cloud must be (N, 13) array");
+    if (cloud_buf.ndim != 2 || cloud_buf.shape[1] < 6) {
+        throw std::runtime_error("cloud must be (N, >=6) array (xyz+rgb minimum)");
     }
     if (pos_buf.ndim != 1 || pos_buf.shape[0] != 3) {
         throw std::runtime_error("pos must be (3,) array");
@@ -56,6 +56,8 @@ py::array_t<float> generate_pano_cpp(
     }
 
     const int n_points = cloud_buf.shape[0];
+    const int n_input_ch = cloud_buf.shape[1];  // e.g. 6 (xyz+rgb) or 13 (xyz+rgb+seg7)
+    const int n_extra = n_input_ch - 6;  // extra channels beyond xyz+rgb
     const float* cloud_ptr = static_cast<float*>(cloud_buf.ptr);
     const float* pos_ptr = static_cast<float*>(pos_buf.ptr);
     const float* rot_ptr = static_cast<float*>(rot_buf.ptr);
@@ -63,7 +65,7 @@ py::array_t<float> generate_pano_cpp(
     // Constants
     const int width = 360;
     const int height = 180;
-    const int n_channels = 11;  // r, g, b, d, c1-c7
+    const int n_channels = 4 + n_extra;  // rgb + d + extra
     const float ufac = 180.0f / M_PI;  // radians to degrees
     const float vfac = 180.0f / M_PI;
 
@@ -91,7 +93,7 @@ py::array_t<float> generate_pano_cpp(
     // Project all points
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n_points; ++i) {
-        const float* pt = cloud_ptr + i * 13;
+        const float* pt = cloud_ptr + i * n_input_ch;
 
         // Transform: subtract position
         float x = pt[0] - px;
@@ -143,8 +145,8 @@ py::array_t<float> generate_pano_cpp(
                 // Depth normalized to 0-255
                 out[3] = std::min(255.0f, dist / view_dist * 255.0f);
 
-                // Segmentation channels c1-c7 (keep 0-1 range, matching panorama.py)
-                for (int c = 0; c < 7; ++c) {
+                // Extra channels (seg etc, keep original range)
+                for (int c = 0; c < n_extra; ++c) {
                     out[4 + c] = pt[6 + c];
                 }
             }
@@ -168,18 +170,20 @@ py::array_t<float> generate_pano_cpp_fast(
     auto pos_buf = pos.request();
     auto rot_buf = rot_matrix.request();
 
-    if (cloud_buf.ndim != 2 || cloud_buf.shape[1] < 13) {
-        throw std::runtime_error("cloud must be (N, 13) array");
+    if (cloud_buf.ndim != 2 || cloud_buf.shape[1] < 6) {
+        throw std::runtime_error("cloud must be (N, >=6) array (xyz+rgb minimum)");
     }
 
     const int n_points = cloud_buf.shape[0];
+    const int n_input_ch = cloud_buf.shape[1];
+    const int n_extra = n_input_ch - 6;
     const float* cloud_ptr = static_cast<float*>(cloud_buf.ptr);
     const float* pos_ptr = static_cast<float*>(pos_buf.ptr);
     const float* rot_ptr = static_cast<float*>(rot_buf.ptr);
 
     const int width = 360;
     const int height = 180;
-    const int n_channels = 11;
+    const int n_channels = 4 + n_extra;
     const float ufac = 180.0f / M_PI;
     const float vfac = 180.0f / M_PI;
 
@@ -204,7 +208,7 @@ py::array_t<float> generate_pano_cpp_fast(
     // No critical section - relaxed consistency (may have minor artifacts)
     #pragma omp parallel for schedule(static)
     for (int i = 0; i < n_points; ++i) {
-        const float* pt = cloud_ptr + i * 13;
+        const float* pt = cloud_ptr + i * n_input_ch;
 
         float x = pt[0] - px;
         float y = pt[1] - py_;
@@ -242,8 +246,7 @@ py::array_t<float> generate_pano_cpp_fast(
             out[1] = pt[4];
             out[2] = pt[5];
             out[3] = std::min(255.0f, dist / view_dist * 255.0f);
-            // Segmentation channels c1-c7 (keep 0-1 range, matching panorama.py)
-            for (int c = 0; c < 7; ++c) {
+            for (int c = 0; c < n_extra; ++c) {
                 out[4 + c] = pt[6 + c];
             }
         }
@@ -270,9 +273,20 @@ py::array_t<float> generate_pano_multi(
 
     const int width = 360;
     const int height = 180;
-    const int n_channels = 11;
     const float ufac = 180.0f / M_PI;
     const float vfac = 180.0f / M_PI;
+
+    // Detect channel count from first cloud
+    int n_input_ch = 6;
+    for (auto& cloud : clouds) {
+        auto buf = cloud.request();
+        if (buf.ndim == 2 && buf.shape[1] >= 6) {
+            n_input_ch = buf.shape[1];
+            break;
+        }
+    }
+    const int n_extra = n_input_ch - 6;
+    const int n_channels = 4 + n_extra;
 
     // Build index: store pointers and cumulative counts
     std::vector<const float*> cloud_ptrs;
@@ -281,7 +295,7 @@ py::array_t<float> generate_pano_multi(
 
     for (auto& cloud : clouds) {
         auto buf = cloud.request();
-        if (buf.ndim == 2 && buf.shape[1] >= 13) {
+        if (buf.ndim == 2 && buf.shape[1] >= 6) {
             cloud_ptrs.push_back(static_cast<const float*>(buf.ptr));
             cumsum.push_back(total_points);
             total_points += buf.shape[0];
@@ -335,7 +349,7 @@ py::array_t<float> generate_pano_multi(
         }
         const int ci = lo;
         const size_t local_idx = gi - cumsum_ptr[ci];
-        const float* pt = ptrs[ci] + local_idx * 13;
+        const float* pt = ptrs[ci] + local_idx * n_input_ch;
 
         float x = pt[0] - px;
         float y = pt[1] - py_;
@@ -371,7 +385,7 @@ py::array_t<float> generate_pano_multi(
             out[1] = pt[4];
             out[2] = pt[5];
             out[3] = std::min(255.0f, dist / view_dist * 255.0f);
-            for (int c = 0; c < 7; ++c) {
+            for (int c = 0; c < n_extra; ++c) {
                 out[4 + c] = pt[6 + c];
             }
         }
