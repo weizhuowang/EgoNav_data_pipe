@@ -145,15 +145,52 @@ class McapBagReader(BaseBagReader):
             topic = msg.channel.topic
             ros_msg = msg.ros_msg
 
-            # Get timestamp
+            # Get timestamp (prefer header.stamp for generation time)
             if hasattr(ros_msg, 'header') and hasattr(ros_msg.header, 'stamp'):
                 stamp = ros_msg.header.stamp
                 timestamp = stamp.sec + stamp.nanosec * 1e-9
             else:
-                # Use log_time (nanoseconds)
-                timestamp = msg.log_time * 1e-9
+                # Fallback to log_time (datetime object)
+                timestamp = msg.log_time.timestamp()
 
             yield topic, ros_msg, timestamp
+
+    def read_messages_safe(self, topics: List[str] = None) -> Iterator[Tuple[str, Any, float]]:
+        """Read messages, skipping corrupted chunks (for recovered mcap files)"""
+        import mcap.stream_reader as _sr
+        from mcap_ros2.reader import read_ros2_messages
+
+        _orig_breakup = _sr.breakup_chunk
+        _skipped = [0]
+
+        def _safe_breakup(chunk, validate_crc=False):
+            try:
+                return _orig_breakup(chunk, validate_crc)
+            except Exception:
+                _skipped[0] += 1
+                if _skipped[0] <= 3:
+                    print(f"Warning: Skipping corrupted chunk #{_skipped[0]}")
+                elif _skipped[0] == 4:
+                    print("Warning: Suppressing further chunk warnings...")
+                return []
+
+        _sr.breakup_chunk = _safe_breakup
+        try:
+            for msg in read_ros2_messages(self._mcap_path, topics=topics):
+                topic = msg.channel.topic
+                ros_msg = msg.ros_msg
+
+                if hasattr(ros_msg, 'header') and hasattr(ros_msg.header, 'stamp'):
+                    stamp = ros_msg.header.stamp
+                    timestamp = stamp.sec + stamp.nanosec * 1e-9
+                else:
+                    timestamp = msg.log_time.timestamp()
+
+                yield topic, ros_msg, timestamp
+        finally:
+            _sr.breakup_chunk = _orig_breakup
+            if _skipped[0] > 0:
+                print(f"Total corrupted chunks skipped: {_skipped[0]}")
 
     def get_topic_info(self) -> Dict[str, TopicInfo]:
         """Get all topic information"""
@@ -245,6 +282,12 @@ class BagReader:
 
     def read_messages(self, topics: List[str] = None) -> Iterator[Tuple[str, Any, float]]:
         """Read messages"""
+        return self._reader.read_messages(topics)
+
+    def read_messages_safe(self, topics: List[str] = None) -> Iterator[Tuple[str, Any, float]]:
+        """Read messages, skipping corrupted chunks (mcap only)"""
+        if hasattr(self._reader, 'read_messages_safe'):
+            return self._reader.read_messages_safe(topics)
         return self._reader.read_messages(topics)
 
     def get_topic_info(self) -> Dict[str, TopicInfo]:

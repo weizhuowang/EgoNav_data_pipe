@@ -157,7 +157,8 @@ class SimpleLabelProjector:
         depth: np.ndarray,
         seg: np.ndarray,
         color: np.ndarray = None,
-        min_depth: float = 0.3
+        min_depth: float = 0.3,
+        max_depth: float = 8.0
     ) -> np.ndarray:
         """
         Project segmentation results to point cloud
@@ -167,6 +168,7 @@ class SimpleLabelProjector:
             seg: (H, W, 7) segmentation result
             color: (H, W, 3) RGB image (optional)
             min_depth: minimum depth
+            max_depth: maximum depth (D455 is inaccurate beyond ~8m)
 
         Returns:
             (N, 13) point cloud [x, y, z, r, g, b, c1, c2, c3, c4, c5, c6, c7]
@@ -178,8 +180,8 @@ class SimpleLabelProjector:
         # Pixel grid
         v, u = np.indices((H, W))
 
-        # Valid depth
-        mask = depth > min_depth
+        # Valid depth (filter both min and max)
+        mask = (depth > min_depth) & (depth < max_depth)
 
         u_valid = u[mask]
         v_valid = v[mask]

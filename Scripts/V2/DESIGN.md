@@ -332,3 +332,169 @@ pc_data = fixrgb(rnp.numpify(msg))  # xyz+rgb, 无额外过滤
 - **存储**: 0-1 (10m = 1.0)
 - **使用**: 乘以 10 转为米
 - **处理**: 所有 depth_frame 都经过 remove_edges (Canny + dilate)
+
+## ROS2 mcap 支持
+
+### 设计原则
+在 `extract_from_bag` 阶段将 ROS2 数据转换成与 ROS1 完全一致的格式，后续 pipeline 代码无需任何修改。
+
+### ROS1 vs ROS2 Topics 对比
+
+| 数据 | ROS1 Topic | ROS2 Topic | 说明 |
+|------|------------|------------|------|
+| Odom | `/t265/odom/sample` | `/T265/pose/sample` | nav_msgs/Odometry |
+| Color | `/d400/color/image_raw` | `/D400/color/image_raw` | sensor_msgs/Image |
+| Depth | - | `/D400/depth/image_rect_raw` | sensor_msgs/Image (16UC1) |
+| PointCloud | `/save_pc` | - | 需从 depth+color 生成 |
+| Panorama TS | `/testpano` | - | 需自动生成 20Hz |
+| Trigger | - | `/vm_trigger` | std_msgs/Header, 标记点云时刻 |
+
+### ROS2 数据转换流程
+
+```
+ROS2 Bag 读取
+     │
+     ├─ /T265/pose/sample ──────────────────────────→ odom (同 ROS1)
+     │
+     ├─ /D400/color/image_raw ──────────────────────→ video_frame, video_t (同 ROS1)
+     │
+     ├─ /D400/depth/image_rect_raw ─→ depth_frame, depth_t (新增 depth_t)
+     │                                      │
+     │                                      ↓
+     └─ /vm_trigger ─────────────────→ 找最近的 depth+color
+                                              │
+                                              ↓
+                                       生成点云 (xyz+rgb)
+                                              │
+                                              ↓
+                                       pc_frame, pc_t (等价 ROS1 /save_pc)
+
+提取完成后:
+     │
+     └─ 生成 pano_t: np.arange(pc_t[0], data_array[-1, 0], 1/20)
+                     (从第一个点云开始，20Hz，到 data_array 结束)
+```
+
+### 实现修改
+
+#### 1. DataDict 添加 depth_t
+```python
+@dataclass
+class DataDict:
+    # 新增
+    depth_t: List[float] = field(default_factory=list)
+```
+
+#### 2. _extract_depth 记录时间戳
+```python
+def _extract_depth(self, msg: Any, timestamp: float):
+    # ... 现有代码 ...
+    self.data.depth_frame.append(depth[:, :, np.newaxis])
+    self.data.depth_t.append(timestamp)  # 新增
+```
+
+#### 3. _extract_trigger 生成点云
+```python
+def _extract_trigger(self, msg: Any, timestamp: float):
+    """ROS2: vm_trigger 时刻生成点云"""
+    # 找最近的 depth frame
+    depth_t = np.array(self.data.depth_t)
+    depth_idx = np.argmin(np.abs(depth_t - timestamp))
+    depth_frame = self.data.depth_frame[depth_idx]
+
+    # 找最近的 color frame
+    video_t = np.array(self.data.video_t)
+    video_idx = np.argmin(np.abs(video_t - timestamp))
+    color_frame = self.data.video_frame[video_idx]
+
+    # depth + color → 点云 (xyz + rgb)
+    pc = self._depth_color_to_pointcloud(depth_frame, color_frame)
+
+    self.data.pc_t.append(timestamp)
+    self.data.pc_frame.append(pc)
+    self._pc_idx = len(self.data.pc_t) - 1
+
+    # 不再单独记录 pano_t，统一在提取结束后生成
+```
+
+#### 4. extract_from_bag 结束后生成 pano_t
+```python
+def extract_from_bag(self, bag_reader: BagReader, ...):
+    # ... 现有提取代码 ...
+
+    # ROS2: 自动生成 pano_t
+    if bag_reader.format == 'mcap' and not self.data.pano_t:
+        self._generate_pano_t()
+
+def _generate_pano_t(self):
+    """ROS2: 生成 20Hz pano_t"""
+    if not self.data.pc_t or self.data.data_array is None:
+        return
+
+    t_start = self.data.pc_t[0]  # 从第一个点云开始
+    t_end = self.data.data_array[-1, 0]  # 到 data_array 结束
+
+    self.data.pano_t = list(np.arange(t_start, t_end, 1/20))
+    print(f"Generated pano_t: {len(self.data.pano_t)} frames at 20Hz")
+```
+
+### 输出一致性
+提取完成后，ROS2 和 ROS1 输出完全一致:
+
+```
+pc_t:        [稀疏 ~1Hz] - ROS1: /save_pc 时间戳, ROS2: /vm_trigger 时间戳
+pc_frame:    [xyz+rgb]   - ROS1: /save_pc 点云, ROS2: depth+color 生成
+pano_t:      [20Hz]      - ROS1: /testpano 时间戳, ROS2: 自动生成
+video_t:     [~30Hz]     - 两者相同
+video_frame: [rgb]       - 两者相同
+depth_frame: [0-1]       - ROS1: 从 pc 生成, ROS2: 直接读取
+data_array:  [25 cols]   - 两者相同
+```
+
+后续 pipeline (segmentation, panorama generation) 代码无需任何修改。
+
+## mcap 修复工具 (fix_mcap.py)
+
+ROS2 录制的 mcap 文件经常出现 LZ4 chunk 损坏，导致 pipeline 读取失败。`fix_mcap.py` 通过重建 mcap 文件跳过坏 chunks。
+
+### 用法
+```bash
+# 单个文件
+python fix_mcap.py input.mcap output.mcap
+
+# 批量修复 (并行)，输出命名为文件夹名
+BAGS=/path/to/V4Data
+for d in bag1 bag2 bag3; do
+  folder="V4Data_260205${d}"
+  inp=$(ls "$BAGS/$folder"/V4Data_*_0.mcap)
+  out="$BAGS/$folder/${folder}.mcap"
+  python fix_mcap.py "$inp" "$out" > "fix_logs/${d}.log" 2>&1 &
+done
+wait
+```
+
+### 功能
+- 使用 `StreamReader(emit_chunks=True)` 读取原始 Chunk 记录
+- `breakup_chunk()` 解压每个 chunk，捕获 LZ4 错误跳过坏 chunks
+- 使用 `Writer(compression=CompressionType.LZ4)` 重建干净的 mcap
+- Channel/Schema ID 重映射
+- **T265 gap 检测**: 如果 T265 时间戳间隔 >0.1s 会打印告警 (200Hz 正常间隔 ~5ms)
+- 输出跳过的 chunk 数量、相对时间、大小
+
+### 输出示例
+```
+Done! Messages saved: 90236, Chunks skipped: 0
+```
+如果有问题会显示:
+```
+  [skipped chunk] t=270.3s  size=1.18MB  (LZ4 decompression error)
+  [t265 gap] t=437.1s  gap=3.024s
+Done! Messages saved: 158320, Chunks skipped: 3
+```
+- `skipped chunk`: 坏的 LZ4 chunk，显示相对时间和大小
+- `t265 gap`: T265 里程计时间戳间隔 >0.1s (正常 ~5ms @200Hz)，表示数据丢失/卡顿
+
+### 注意事项
+- 修复后的 mcap 应命名为文件夹名 (如 `V4Data_260205quad.mcap`)，而非 `fixed.mcap`
+- 跳过坏 chunks 会导致该时间段的数据丢失，但不影响 pipeline 整体运行
+- T265 gap 可用于判断数据质量 (stutter > 3s 的数据可能不可用)

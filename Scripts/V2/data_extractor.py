@@ -21,6 +21,7 @@ class DataDict:
     pano_t: List[float] = field(default_factory=list)
     video_t: List[float] = field(default_factory=list)
     pc_t: List[float] = field(default_factory=list)
+    depth_t: List[float] = field(default_factory=list)  # ROS2: depth frame timestamps
 
     # Frame data lists
     pano_frame: List[np.ndarray] = field(default_factory=list)
@@ -81,6 +82,10 @@ class DataExtractor:
         self._temp_joint = np.zeros(4)
         self._temp_step = 0
 
+        # Depth buffer (ROS2) - store all frames, only keep triggered ones
+        self._depth_buffer = []
+        self._depth_buffer_t = []
+
         # Indices
         self._pc_idx = 0
         self._video_idx = 0
@@ -113,7 +118,10 @@ class DataExtractor:
         topics = ROS1_TOPICS if bag_reader.format == 'ros1' else ROS2_TOPICS
 
         total = bag_reader.get_message_count()
-        iterator = bag_reader.read_messages()
+        read_fn = bag_reader.read_messages
+        if hasattr(bag_reader, 'read_messages_safe'):
+            read_fn = bag_reader.read_messages_safe
+        iterator = read_fn()
 
         if progress:
             iterator = tqdm(iterator, total=total, desc="Extracting data")
@@ -124,6 +132,22 @@ class DataExtractor:
         # Convert to numpy array
         if self._data_lines:
             self.data.data_array = np.array(self._data_lines, dtype=float)
+
+        # ROS2: Generate pano_t if not present (ROS1 has /testpano topic)
+        if bag_reader.format == 'mcap' and not self.data.pano_t:
+            self._generate_pano_t()
+
+    def _generate_pano_t(self, hz: int = 20):
+        """Generate pano_t for ROS2 (20Hz from first pc to end of data_array)"""
+        if not self.data.pc_t or self.data.data_array is None:
+            print("Warning: Cannot generate pano_t without pc_t and data_array")
+            return
+
+        t_start = self.data.pc_t[0]  # Start from first pointcloud
+        t_end = self.data.data_array[-1, 0]  # End at last data entry
+
+        self.data.pano_t = list(np.arange(t_start, t_end, 1.0 / hz))
+        print(f"Generated pano_t: {len(self.data.pano_t)} frames at {hz}Hz")
 
     def _extract_message(
         self,
@@ -260,25 +284,49 @@ class DataExtractor:
             print(f"Warning: Failed to extract panorama: {e}")
 
     def _extract_video(self, msg: Any, timestamp: float):
-        """Extract video frame"""
+        """Extract video frame (ROS1 and ROS2)"""
         try:
-            import ros_numpy as rnp
-            import sensor_msgs
-            msg.__class__ = sensor_msgs.msg._Image.Image
-            img = rnp.numpify(msg)
+            img = None
 
-            self.data.video_t.append(timestamp)
-            self.data.video_frame.append(img)
-            self._video_idx = len(self.data.video_t) - 1
+            # Try ROS2 format first (has data attribute directly usable)
+            if hasattr(msg, 'data') and hasattr(msg, 'encoding'):
+                H, W = msg.height, msg.width
+                encoding = msg.encoding
 
-            # Update valid_start on first video frame
-            if self._video_idx == 0:
-                self._valid_start = max(len(self._data_lines), self._valid_start)
+                if encoding in ('rgb8', 'bgr8'):
+                    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(H, W, 3)
+                    if encoding == 'bgr8':
+                        img = img[:, :, ::-1]  # BGR to RGB
+                elif encoding == 'rgba8' or encoding == 'bgra8':
+                    img = np.frombuffer(msg.data, dtype=np.uint8).reshape(H, W, 4)[:, :, :3]
+                    if encoding == 'bgra8':
+                        img = img[:, :, ::-1]
+                else:
+                    # Fallback to ros_numpy for ROS1
+                    import ros_numpy as rnp
+                    import sensor_msgs
+                    msg.__class__ = sensor_msgs.msg._Image.Image
+                    img = rnp.numpify(msg)
+            else:
+                # ROS1 format
+                import ros_numpy as rnp
+                import sensor_msgs
+                msg.__class__ = sensor_msgs.msg._Image.Image
+                img = rnp.numpify(msg)
+
+            if img is not None:
+                self.data.video_t.append(timestamp)
+                self.data.video_frame.append(img)
+                self._video_idx = len(self.data.video_t) - 1
+
+                # Update valid_start on first video frame
+                if self._video_idx == 0:
+                    self._valid_start = max(len(self._data_lines), self._valid_start)
         except Exception as e:
             print(f"Warning: Failed to extract video: {e}")
 
     def _extract_depth(self, msg: Any, timestamp: float):
-        """Extract depth image (ROS2)"""
+        """Extract depth image (ROS2) - store to buffer, will filter at trigger"""
         try:
             # ROS2 message format
             if hasattr(msg, 'data'):
@@ -298,15 +346,52 @@ class DataExtractor:
                     print(f"Warning: Unknown depth encoding: {encoding}")
                     return
 
-                self.data.depth_frame.append(depth[:, :, np.newaxis])
+                # Store to buffer (will be filtered at trigger time)
+                self._depth_buffer.append(depth[:, :, np.newaxis])
+                self._depth_buffer_t.append(timestamp)
         except Exception as e:
             print(f"Warning: Failed to extract depth: {e}")
 
     def _extract_trigger(self, msg: Any, timestamp: float):
-        """Extract trigger timestamp (ROS2)"""
-        # /vm_trigger is std_msgs/Header, records panorama generation moment
-        self.data.pano_t.append(timestamp)
-        self._pano_idx = len(self.data.pano_t) - 1
+        """Extract trigger and generate pointcloud (ROS2)
+
+        /vm_trigger marks the moment to capture a pointcloud.
+        Find nearest depth + color frames and generate xyz+rgb pointcloud.
+        """
+        # Need depth and color frames to generate pointcloud
+        if not self._depth_buffer_t or not self.data.video_t:
+            return
+
+        # Find nearest depth frame from buffer
+        depth_t = np.array(self._depth_buffer_t)
+        depth_idx = np.argmin(np.abs(depth_t - timestamp))
+        depth_frame = self._depth_buffer[depth_idx]
+
+        # Find nearest color frame
+        video_t = np.array(self.data.video_t)
+        video_idx = np.argmin(np.abs(video_t - timestamp))
+        color_frame = self.data.video_frame[video_idx]
+
+        # Convert depth from 0-1 range to meters (stored as 10m=1.0)
+        depth_meters = depth_frame[:, :, 0] * 10.0
+
+        # Generate pointcloud (xyz + rgb)
+        pc = self.pc_processor.depth_to_pointcloud(
+            depth_meters, color_frame, min_depth=0.3
+        )
+
+        # Store pointcloud
+        self.data.pc_t.append(timestamp)
+        self.data.pc_frame.append(pc)
+        self._pc_idx = len(self.data.pc_t) - 1
+
+        # Store the matched depth frame to final list
+        self.data.depth_frame.append(depth_frame)
+        self.data.depth_t.append(self._depth_buffer_t[depth_idx])
+
+        # Update valid_start on first pointcloud
+        if self._pc_idx == 0:
+            self._valid_start = max(len(self._data_lines), self._valid_start)
 
     def _add_data_line(self, timestamp: float):
         """
@@ -401,11 +486,20 @@ class DataExtractor:
         t_end = data_t[-1]
         t_step = 1.0 / hz
 
+        # Prepare pano_t array for index lookup
+        pano_t = np.array(self.data.pano_t) if self.data.pano_t else None
+
         resampled = []
         # Match original: t_end + 0.5*t_step - 1 (remove last ~1 second)
         for t in tqdm(np.arange(t_start, t_end + 0.5 * t_step - 1, t_step)):
             idx = np.argmin(np.abs(data_t - t))
             line = [t] + list(self.data.data_array[idx, 1:])
+
+            # Recompute pano_idx based on time (for ROS2 where pano_t is generated)
+            if pano_t is not None and len(pano_t) > 0:
+                pano_idx = np.argmin(np.abs(pano_t - t))
+                line[23] = pano_idx  # column 23 is pano_idx
+
             resampled.append(line)
 
         self.data.data_array = np.array(resampled, dtype=float)

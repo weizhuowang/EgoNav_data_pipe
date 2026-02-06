@@ -135,7 +135,7 @@ def process_bag(
     # Remove large intermediate data not needed in final output
     # (pc_frame and video_frame are only used during processing)
     final_dict.pop("pc_frame", None)
-    final_dict.pop("video_frame", None)
+    # Keep video_frame in final output
 
     # Save (full dict, not minimal)
     print("\nSaving training set...")
@@ -231,9 +231,9 @@ def _run_segmentation_pipeline(
         # Ensure segmentation and depth are consistent
         seg = seg_frames[i] * np.sign(depth_meters[:, :, np.newaxis])
 
-        # Project to point cloud
+        # Project to point cloud (filter >8m, D455 inaccurate at long range)
         pc_local = projector.project_seg_to_pointcloud(
-            depth_meters, seg, video_frame, min_depth=0.3
+            depth_meters, seg, video_frame, min_depth=0.3, max_depth=8.0
         )
 
         # Transform to global coordinate system
@@ -323,7 +323,7 @@ def main():
     parser.add_argument(
         "--window-sz",
         type=int,
-        default=32,
+        default=24,
         help="Point cloud window size for panorama (default: 32)",
     )
     parser.add_argument(
